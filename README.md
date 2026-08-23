@@ -45,23 +45,47 @@ https://www.tiktok.com/@user/video/456
 python main.py --links-file links.txt [--model large-v2] [--language en]
 ```
 
+> **Auto-clear:** When `--links-file` is used, the file is automatically truncated to empty after the run completes, so it's ready for the next batch of links.
+
 ### Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `--links-file FILE` | — | Text file with one URL per line |
+| `--links-file FILE` | — | Text file with one URL per line (cleared after run) |
 | `--model SIZE` | `medium` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v2` |
 | `--language LANG` | `de` | BCP-47 language code (e.g. `de`, `en`, `fr`) |
 
 ## Output
 
 - Downloaded MP3 files are saved to the `downloads/` directory.
-- Transcript `.txt` files are saved to the `transcripts/` directory, named by TikTok video ID.
-- Each transcript file is prefixed with a header:
+- All transcripts from a single run are written into **one combined file** inside `transcripts/`, named `batch_N.txt` where `N` auto-increments (e.g. `batch_1.txt`, `batch_2.txt`, …).
+
+### Batch file format
+
+Each video gets its own section, separated by a blank line:
 
 ```
 Video 1
 Source: https://www.tiktok.com/@user/video/123
 ---
-<transcript text>
+First segment text.
+Second segment text.
+Third segment text.
+
+Video 2
+Source: https://www.tiktok.com/@user/video/456
+---
+Segment text here.
+```
+
+Each line of transcript text corresponds to one faster-whisper segment (roughly one sentence or 15–20 seconds of speech), giving natural paragraph breaks.
+
+### Failed videos
+
+If a video fails to download or transcribe, a placeholder entry is written so the numbering stays consistent with the original link list:
+
+```
+Video 2 [FAILED - could not download]
+Source: https://www.tiktok.com/@user/video/456
+---
 ```

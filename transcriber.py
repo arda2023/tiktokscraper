@@ -1,14 +1,19 @@
 import logging
 import os
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Generator, NamedTuple, Optional
 
 from faster_whisper import WhisperModel
+from faster_whisper.transcribe import Segment
 
 logger = logging.getLogger(__name__)
 
 
-def _load_model(model_size: str, use_gpu: bool = False) -> WhisperModel:
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+def load_model(model_size: str, use_gpu: bool = False) -> WhisperModel:
     """
     Load the WhisperModel on CPU (default) or CUDA.
 
@@ -42,6 +47,42 @@ def _load_model(model_size: str, use_gpu: bool = False) -> WhisperModel:
     return model
 
 
+# ---------------------------------------------------------------------------
+# Single-file transcription (returns raw segments)
+# ---------------------------------------------------------------------------
+
+def transcribe_single(
+    file_path: str,
+    model: WhisperModel,
+    language: str = "de",
+) -> list[Segment]:
+    """
+    Transcribe one audio file and return the raw faster-whisper segments.
+
+    Each segment has ``.text``, ``.start``, and ``.end`` attributes so the
+    caller can format the output however it likes (e.g. newlines between
+    segments, timestamps, etc.).
+
+    Args:
+        file_path: Path to the audio file to transcribe.
+        model:     A pre-loaded WhisperModel instance.
+        language:  BCP-47 language code (default: ``"de"``).
+
+    Returns:
+        List of faster-whisper ``Segment`` objects.
+
+    Raises:
+        Exception: Propagated from faster-whisper on any transcription error.
+    """
+    segments_gen, _info = model.transcribe(file_path, language=language)
+    # Materialise the generator so errors surface here, not lazily later.
+    return list(segments_gen)
+
+
+# ---------------------------------------------------------------------------
+# Legacy batch helper (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
+
 def transcribe_files(
     file_paths: list[str],
     output_dir: str = "transcripts",
@@ -53,43 +94,27 @@ def transcribe_files(
     video_numbers: Optional[list[int]] = None,
 ) -> dict[str, str]:
     """
-    Transcribe a batch of audio files using faster-whisper.
+    Transcribe a batch of audio files and write one .txt per file.
 
-    Each file is transcribed individually so that a failure on one file does
-    not abort the entire batch.  Results are written as plain-text ``.txt``
-    files inside *output_dir*, named after the input file's stem (video ID).
+    This is the original batch helper retained for backwards compatibility.
+    New code should use :func:`load_model` + :func:`transcribe_single` directly
+    for more control over output formatting.
 
     Args:
-        file_paths:        Absolute or relative paths to the audio files to transcribe.
-        output_dir:        Directory where transcript ``.txt`` files are saved.
-                           Created automatically if it does not exist.
-        model_size:        faster-whisper model size string (default: ``"medium"``).
-        progress_callback: Optional callable invoked after every file with the
-                           signature ``(file_name: str, success: bool,
-                           current_index: int, total_count: int) -> None``.
-        language:          BCP-47 language code passed to the Whisper model
-                           (default: ``"de"`` for German).
-        use_gpu:           When True, attempt GPU transcription (re-enable once
-                           the CUDA DLL issue is resolved). Default: False.
-        source_urls:       Optional list of source URLs parallel to *file_paths*.
-                           When provided, each transcript file gets a header block::
-
-                               Video <N>
-                               Source: <url>
-                               ---
-                               <transcript>
-        video_numbers:     Optional list of integers parallel to *file_paths* that
-                           control the ``Video <N>`` label in the header.  Defaults
-                           to 1-based position within *file_paths* when omitted.
+        file_paths:        Paths to audio files.
+        output_dir:        Directory for output ``.txt`` files.
+        model_size:        faster-whisper model size string.
+        progress_callback: ``(file_name, success, index, total) -> None``.
+        language:          BCP-47 language code (default ``"de"``).
+        use_gpu:           Attempt CUDA when True (default False).
+        source_urls:       Parallel list of source URLs written into headers.
+        video_numbers:     Parallel list of video numbers for headers.
 
     Returns:
-        A mapping of ``video_id -> transcript_text`` for every successfully
-        transcribed file.  Files that raised an exception are omitted.
+        Mapping of ``video_id -> joined transcript text``.
     """
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
-
-    model = _load_model(model_size, use_gpu=use_gpu)
+    model = load_model(model_size, use_gpu=use_gpu)
 
     results: dict[str, str] = {}
     total = len(file_paths)
@@ -100,16 +125,12 @@ def transcribe_files(
         success = False
 
         try:
-            segments, _info = model.transcribe(file_path, language=language)
-            transcript = "".join(segment.text for segment in segments)
+            segments = transcribe_single(file_path, model, language=language)
+            transcript = "".join(seg.text for seg in segments)
 
-            # Build optional header
             video_num = (video_numbers[index - 1] if video_numbers else index)
             source_url = (source_urls[index - 1] if source_urls else None)
-            if source_url:
-                header = f"Video {video_num}\nSource: {source_url}\n---\n"
-            else:
-                header = ""
+            header = f"Video {video_num}\nSource: {source_url}\n---\n" if source_url else ""
 
             output_path = Path(output_dir) / f"{video_id}.txt"
             output_path.write_text(header + transcript, encoding="utf-8")
