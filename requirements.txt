@@ -1,0 +1,5 @@
+yt-dlp
+faster-whisper
+customtkinter
+nvidia-cudnn-cu12
+nvidia-cublas-cu12
