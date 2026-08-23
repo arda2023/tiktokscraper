@@ -1,54 +1,42 @@
-import importlib.util
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-logger = logging.getLogger(__name__)
-
-# On Windows, locate and add NVIDIA cuBLAS/cuDNN to DLL search path
-if os.name == "nt":
-    try:
-        spec = importlib.util.find_spec("nvidia")
-        locations = spec.submodule_search_locations if spec else []
-        
-        # Fallback to sys.path if nvidia spec is not found
-        if not locations:
-            locations = [str(Path(p) / "nvidia") for p in sys.path]
-            
-        for loc in locations:
-            nvidia_dir = Path(loc)
-            for lib in ["cublas", "cudnn"]:
-                bin_path = nvidia_dir / lib / "bin"
-                if bin_path.is_dir():
-                    try:
-                        os.add_dll_directory(str(bin_path))
-                    except Exception:
-                        pass
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to add NVIDIA DLL directories: %s", exc)
-
 from faster_whisper import WhisperModel
 
+logger = logging.getLogger(__name__)
 
-def _load_model(model_size: str) -> WhisperModel:
+
+def _load_model(model_size: str, use_gpu: bool = False) -> WhisperModel:
     """
-    Load the WhisperModel with CUDA (float16) and fall back to CPU (int8) on failure.
+    Load the WhisperModel on CPU (default) or CUDA.
+
+    GPU support is kept but disabled by default while the CUDA DLL loading
+    issue is being resolved.  Set ``use_gpu=True`` to re-enable it once
+    cublas64_12.dll / cudnn can be located reliably at runtime.
 
     Args:
         model_size: The Whisper model size to load (e.g. "medium", "large-v2").
+        use_gpu:    When True, attempt CUDA (float16) and fall back to CPU
+                    (int8) on failure.  When False (default), always use CPU.
 
     Returns:
         A loaded WhisperModel instance.
     """
-    try:
-        model = WhisperModel(model_size, device="cuda", compute_type="float16")
-        logger.info("Loaded WhisperModel '%s' on CUDA with float16.", model_size)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to load WhisperModel on CUDA (%s). Falling back to CPU with int8.", exc
-        )
+    if use_gpu:
+        # --- GPU path (re-enable once CUDA DLL issue is resolved) ---
+        try:
+            model = WhisperModel(model_size, device="cuda", compute_type="float16")
+            logger.info("Loaded WhisperModel '%s' on CUDA with float16.", model_size)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to load WhisperModel on CUDA (%s). Falling back to CPU with int8.", exc
+            )
+            model = WhisperModel(model_size, device="cpu", compute_type="int8")
+            logger.info("Loaded WhisperModel '%s' on CPU with int8.", model_size)
+    else:
+        # --- CPU path (forced while CUDA DLL loading is unreliable) ---
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
         logger.info("Loaded WhisperModel '%s' on CPU with int8.", model_size)
     return model
@@ -60,6 +48,9 @@ def transcribe_files(
     model_size: str = "medium",
     progress_callback: Optional[Callable[[str, bool, int, int], None]] = None,
     language: str = "de",
+    use_gpu: bool = False,
+    source_urls: Optional[list[str]] = None,
+    video_numbers: Optional[list[int]] = None,
 ) -> dict[str, str]:
     """
     Transcribe a batch of audio files using faster-whisper.
@@ -78,6 +69,18 @@ def transcribe_files(
                            current_index: int, total_count: int) -> None``.
         language:          BCP-47 language code passed to the Whisper model
                            (default: ``"de"`` for German).
+        use_gpu:           When True, attempt GPU transcription (re-enable once
+                           the CUDA DLL issue is resolved). Default: False.
+        source_urls:       Optional list of source URLs parallel to *file_paths*.
+                           When provided, each transcript file gets a header block::
+
+                               Video <N>
+                               Source: <url>
+                               ---
+                               <transcript>
+        video_numbers:     Optional list of integers parallel to *file_paths* that
+                           control the ``Video <N>`` label in the header.  Defaults
+                           to 1-based position within *file_paths* when omitted.
 
     Returns:
         A mapping of ``video_id -> transcript_text`` for every successfully
@@ -86,7 +89,7 @@ def transcribe_files(
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    model = _load_model(model_size)
+    model = _load_model(model_size, use_gpu=use_gpu)
 
     results: dict[str, str] = {}
     total = len(file_paths)
@@ -100,8 +103,16 @@ def transcribe_files(
             segments, _info = model.transcribe(file_path, language=language)
             transcript = "".join(segment.text for segment in segments)
 
+            # Build optional header
+            video_num = (video_numbers[index - 1] if video_numbers else index)
+            source_url = (source_urls[index - 1] if source_urls else None)
+            if source_url:
+                header = f"Video {video_num}\nSource: {source_url}\n---\n"
+            else:
+                header = ""
+
             output_path = Path(output_dir) / f"{video_id}.txt"
-            output_path.write_text(transcript, encoding="utf-8")
+            output_path.write_text(header + transcript, encoding="utf-8")
 
             results[video_id] = transcript
             success = True
