@@ -1,11 +1,35 @@
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-from faster_whisper import WhisperModel
-
 logger = logging.getLogger(__name__)
+
+# On Windows, locate and add NVIDIA cuBLAS/cuDNN to DLL search path
+if os.name == "nt":
+    try:
+        spec = importlib.util.find_spec("nvidia")
+        locations = spec.submodule_search_locations if spec else []
+        
+        # Fallback to sys.path if nvidia spec is not found
+        if not locations:
+            locations = [str(Path(p) / "nvidia") for p in sys.path]
+            
+        for loc in locations:
+            nvidia_dir = Path(loc)
+            for lib in ["cublas", "cudnn"]:
+                bin_path = nvidia_dir / lib / "bin"
+                if bin_path.is_dir():
+                    try:
+                        os.add_dll_directory(str(bin_path))
+                    except Exception:
+                        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to add NVIDIA DLL directories: %s", exc)
+
+from faster_whisper import WhisperModel
 
 
 def _load_model(model_size: str) -> WhisperModel:
